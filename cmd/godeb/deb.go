@@ -8,13 +8,15 @@ import (
 	"compress/gzip"
 	"crypto/md5"
 	"fmt"
-	"github.com/blakesmith/ar"
 	"go/build"
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"strings"
 	"time"
+
+	"github.com/blakesmith/ar"
 )
 
 func createDeb(version string, tarball io.Reader, deb io.Writer) error {
@@ -210,6 +212,7 @@ func translateTarball(now time.Time, tarball io.Reader) (dataTarGz, md5sums []by
 	}
 	in := tar.NewReader(uncompress)
 	first := true
+	dirseen := make(map[string]bool)
 	for {
 		h, err := in.Next()
 		if err == io.EOF {
@@ -240,6 +243,36 @@ func translateTarball(now time.Time, tarball io.Reader) (dataTarGz, md5sums []by
 		h.Name = prefix + h.Name
 		if h.Typeflag == tar.TypeDir && !strings.HasSuffix(h.Name, "/") {
 			h.Name += "/"
+		}
+
+		// go1.21.0 lacks TypeFlag dir for new directories, and so we track the missing ones and
+		// add them ourselves, taking care to create more than one depth of dir if neccessary
+		if h.Typeflag == tar.TypeDir {
+			// log.Println("dir", h.Name)
+			dirseen[h.Name] = true
+		} else {
+			dir := strings.TrimPrefix(h.Name, prefix)
+			dir, _ = path.Split(dir)
+			dirs := strings.Split(dir, "/")
+			dirName := prefix
+			for _, v := range dirs[:len(dirs)-1] {
+				dirName += v + "/"
+				if !dirseen[dirName] {
+					dirseen[dirName] = true
+					// log.Println("dir", dirName)
+					h2 := tar.Header{
+						Name:     dirName,
+						Mode:     0755,
+						ModTime:  h.ModTime,
+						Typeflag: tar.TypeDir,
+					}
+					if err := out.WriteHeader(&h2); err != nil {
+						return nil, nil, 0, fmt.Errorf("cannot write header of %s to data.tar.gz: %v", h.Name, err)
+					}
+					dirseen[dirName] = true
+				}
+			}
+			// log.Println("file", h.Name, h.Size)
 		}
 		if err := out.WriteHeader(h); err != nil {
 			return nil, nil, 0, fmt.Errorf("cannot write header of %s to data.tar.gz: %v", h.Name, err)
